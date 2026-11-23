@@ -62,3 +62,13 @@ name may appear in public Certificate Transparency logs.
 python3 -m unittest -v
 docker build -t glinet-comet-cert:local .
 ```
+
+## Image publishing
+
+The [GitHub Actions workflow](.github/workflows/image.yml) runs the TLS
+integration tests before calling [Docker's official reusable builder](https://github.com/docker/github-builder).
+Pushes to `main` publish an AMD64/ARM64 index to
+`ghcr.io/yaleman/glinet-comet-cert` with `latest` and a full commit SHA tag.
+Use the published index digest in Kubernetes rather than `latest`.
+The workflow uses GitHub's built-in job token; it does not need appliance
+credentials or a separately stored registry token.
