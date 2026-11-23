@@ -26,12 +26,13 @@ class HTTPSFixture(http.server.ThreadingHTTPServer):
 
     def __init__(
         self, paths, reject_upload=False, untrusted_old=False,
-        require_mfa=False, disconnect_on_upload=False,
+        require_mfa=False, disconnect_on_upload=False, acknowledge_without_swap=False,
     ):
         self.paths = paths
         self.reject_upload = reject_upload
         self.require_mfa = require_mfa
         self.disconnect_on_upload = disconnect_on_upload
+        self.acknowledge_without_swap = acknowledge_without_swap
         self.requests = []
         self.contexts = {}
         for kind in ("old", "new"):
@@ -72,7 +73,8 @@ class FixtureHandler(http.server.BaseHTTPRequestHandler):
         elif self.server.reject_upload:
             reply = {"ok": True, "result": {"success": False}}
         else:
-            self.server.active = "new"
+            if not self.server.acknowledge_without_swap:
+                self.server.active = "new"
             if self.server.disconnect_on_upload:
                 self.close_connection = True
                 self.connection.shutdown(socket.SHUT_RDWR)
@@ -161,7 +163,7 @@ class TestUploader(unittest.TestCase):
         self.addCleanup(cleanup)
         return server
 
-    def run_cli(self, server, *, cli_args=(), factory_pin=None, **overrides):
+    def run_cli(self, server, *, skip_retry_delays=False, **overrides):
         env = {key: value for key, value in os.environ.items()
                if not key.startswith("COMET_")}
         env.update(
@@ -178,12 +180,11 @@ class TestUploader(unittest.TestCase):
                 env.pop(key, None)
             else:
                 env[key] = value
-        if factory_pin is None:
-            command = [sys.executable, str(UPLOADER), *cli_args]
-        else:
+        command = [sys.executable, str(UPLOADER)]
+        if skip_retry_delays:
             command = [sys.executable, "-c",
-                       "import uploader,sys; uploader.FACTORY_PIN=sys.argv.pop(1); "
-                       "raise SystemExit(uploader.main())", factory_pin, *cli_args]
+                       "import uploader; uploader.time.sleep=lambda _:None; "
+                       "raise SystemExit(uploader.main())"]
         run = subprocess.run(
             command, cwd=UPLOADER.parent,
             env=env, capture_output=True, text=True, timeout=25,
@@ -249,61 +250,59 @@ class TestUploader(unittest.TestCase):
         self.assertIn("shared factory certificate", run.stderr)
         self.assertEqual(server.requests, [])
 
-    def synthetic_factory_pin(self):
-        return hashlib.sha256(ssl.PEM_cert_to_DER_cert(
-            self.paths["old_untrusted_crt"].read_text()
-        )).hexdigest()
-
-    def test_factory_bootstrap_is_opt_in(self):
+    def test_ignore_tls_verify_false_still_rejects_untrusted_peer(self):
         server = self.start_server(untrusted_old=True)
-        run = self.run_cli(server, factory_pin=self.synthetic_factory_pin())
+        run = self.run_cli(server, COMET_IGNORE_TLS_VERIFY="false")
         self.assertNotEqual(run.returncode, 0)
         self.assertEqual(server.requests, [])
 
-    def test_factory_bootstrap_requires_explicit_connect_ip(self):
+    def test_ignore_tls_verify_rejects_invalid_value(self):
         server = self.start_server(untrusted_old=True)
-        run = self.run_cli(
-            server, cli_args=("--allow-factory-bootstrap",),
-            factory_pin=self.synthetic_factory_pin(), COMET_CONNECT_IP=None,
-        )
+        run = self.run_cli(server, COMET_IGNORE_TLS_VERIFY="typo")
         self.assertNotEqual(run.returncode, 0)
-        self.assertIn("COMET_CONNECT_IP", run.stderr)
+        self.assertIn("COMET_IGNORE_TLS_VERIFY", run.stderr)
         self.assertEqual(server.requests, [])
 
-    def test_factory_bootstrap_cannot_be_combined_with_custom_pin(self):
+    def test_ignore_tls_verify_cannot_be_combined_with_pin(self):
         server = self.start_server(untrusted_old=True)
         run = self.run_cli(
-            server, cli_args=("--allow-factory-bootstrap",),
-            factory_pin=self.synthetic_factory_pin(), COMET_TLS_PIN_SHA256="a" * 64,
+            server, COMET_IGNORE_TLS_VERIFY="true", COMET_TLS_PIN_SHA256="a" * 64,
         )
         self.assertNotEqual(run.returncode, 0)
         self.assertIn("COMET_TLS_PIN_SHA256", run.stderr)
         self.assertEqual(server.requests, [])
 
-    def test_factory_bootstrap_rejects_untrusted_nonfactory_leaf(self):
+    def test_ignore_tls_verify_accepts_arbitrary_untrusted_peer(self):
         server = self.start_server(untrusted_old=True)
-        run = self.run_cli(
-            server, cli_args=("--allow-factory-bootstrap",),
-            factory_pin="a" * 64,
-        )
-        self.assertNotEqual(run.returncode, 0)
-        self.assertEqual(server.requests, [])
-
-    def test_factory_bootstrap_rotates_matching_synthetic_factory_leaf(self):
-        server = self.start_server(untrusted_old=True)
-        pin = self.synthetic_factory_pin()
-        first = self.run_cli(
-            server, cli_args=("--allow-factory-bootstrap",), factory_pin=pin,
-        )
-        self.assertEqual(first.returncode, 0, first.stderr)
+        run = self.run_cli(server, COMET_IGNORE_TLS_VERIFY="true")
+        self.assertEqual(run.returncode, 0, run.stderr)
         self.assertEqual(server.active, "new")
         self.assert_upload_forms(server, ("user", "passwd"))
 
-        second = self.run_cli(
-            server, cli_args=("--allow-factory-bootstrap",), factory_pin=pin,
-        )
+    def test_ignore_tls_verify_without_ca_rotates_then_skips_same_leaf(self):
+        server = self.start_server(untrusted_old=True, disconnect_on_upload=True)
+        overrides = {"COMET_IGNORE_TLS_VERIFY": "1", "COMET_CA_PATH": None}
+        first = self.run_cli(server, **overrides)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertIn("TLS trust verification disabled", first.stdout)
+        self.assertIn("TLS identity verification is disabled", first.stderr)
+        self.assertEqual(server.active, "new")
+        self.assert_upload_forms(server, ("user", "passwd"))
+
+        second = self.run_cli(server, **overrides)
         self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertIn("already serving the desired certificate", second.stdout)
         self.assertEqual(len(server.requests), 2)
+
+    def test_ignore_tls_verify_still_requires_expected_leaf_after_upload(self):
+        server = self.start_server(untrusted_old=True, acknowledge_without_swap=True)
+        run = self.run_cli(
+            server, skip_retry_delays=True, COMET_IGNORE_TLS_VERIFY="1", COMET_CA_PATH=None,
+        )
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn("replacement certificate was not observed", run.stderr)
+        self.assertEqual(server.active, "old")
+        self.assert_upload_forms(server, ("user", "passwd"))
 
     def test_matching_old_pin_allows_rotation_to_known_new_leaf(self):
         server = self.start_server(untrusted_old=True)

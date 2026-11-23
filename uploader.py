@@ -41,7 +41,7 @@ class Settings:
     ca: str
     pin: str
     login_fields: tuple
-    allow_factory_bootstrap: bool = False
+    ignore_tls_verify: bool = False
 
     @classmethod
     def from_env(cls, args):
@@ -68,13 +68,14 @@ class Settings:
         pin = env("TLS_PIN_SHA256").lower().replace(":", "")
         if pin and not re.fullmatch(r"[0-9a-f]{64}", pin):
             raise Failure("COMET_TLS_PIN_SHA256 must be a SHA-256 certificate fingerprint.")
-        if args.allow_factory_bootstrap:
-            if not connect_ip:
-                raise Failure("--allow-factory-bootstrap requires an explicit COMET_CONNECT_IP.")
-            if pin:
-                raise Failure("--allow-factory-bootstrap cannot be combined with COMET_TLS_PIN_SHA256.")
+        ignore = env("IGNORE_TLS_VERIFY").strip().lower()
+        if ignore not in ("", "0", "false", "no", "off", "1", "true", "yes", "on"):
+            raise Failure("COMET_IGNORE_TLS_VERIFY must be a boolean (true/false or 1/0).")
+        ignore_tls_verify = ignore in ("1", "true", "yes", "on")
+        if ignore_tls_verify and pin:
+            raise Failure("COMET_IGNORE_TLS_VERIFY cannot be combined with COMET_TLS_PIN_SHA256.")
         if pin == FACTORY_PIN:
-            raise Failure("The shared factory certificate cannot establish identity. Use the isolated bootstrap option instead.")
+            raise Failure("The shared factory certificate cannot establish identity.")
         fields = {
             "user-passwd": ("user", "passwd"),
             "username-password": ("username", "password"),
@@ -86,10 +87,20 @@ class Settings:
         if not all((username, password, cert, key)):
             raise Failure("Set COMET_USERNAME and COMET_PASSWORD, and provide both cert and key paths.")
         return cls(host, port, connect_ip or host, username, password, cert, key,
-                   env("CA_PATH"), pin, fields, args.allow_factory_bootstrap)
+                   env("CA_PATH"), pin, fields, ignore_tls_verify)
 
 
-def trusted_context(settings):
+def unverified_context():
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    return context
+
+
+def client_context(settings):
+    if settings.ignore_tls_verify:
+        return unverified_context()
     context = ssl.create_default_context()
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     if settings.ca:
@@ -184,21 +195,15 @@ class Connection(http.client.HTTPSConnection):
 
         try:
             conn = handshake(self.trust)
-            self.verified = True
+            self.verified = not self.settings.ignore_tls_verify
         except ssl.SSLCertVerificationError as e:
-            pin = FACTORY_PIN if self.settings.allow_factory_bootstrap else self.settings.pin
+            pin = self.settings.pin
             if not self.bootstrap or not pin:
                 raise Failure("The device TLS certificate is not trusted for COMET_URL; no credentials sent on this connection.") from e
-            unverified = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-            unverified.check_hostname = False
-            unverified.verify_mode = ssl.CERT_NONE
-            unverified.minimum_version = ssl.TLSVersion.TLSv1_2
-            conn = handshake(unverified)
+            conn = handshake(unverified_context())
             fingerprint = hashlib.sha256(conn.getpeercert(binary_form=True)).hexdigest()
             if not hmac.compare_digest(fingerprint, pin):
                 conn.close()
-                if self.settings.allow_factory_bootstrap:
-                    raise Failure("The peer does not present the recognized factory certificate; no credentials sent.")
                 raise Failure("The device TLS fingerprint does not match the supplied pin.")
         self.sock = conn
         self.peer = conn.getpeercert(binary_form=True)
@@ -259,14 +264,13 @@ def probe(settings, trust, *, bootstrap=False, timeout=8):
 
 
 def run(settings):
-    trust = trusted_context(settings)
+    trust = client_context(settings)
     expected, body = material(settings, trust)
     current, verified = probe(settings, trust, bootstrap=True)
-    if verified and current == expected:
-        return "Verified: the Comet is already serving the desired certificate; no write needed."
-    if not verified and settings.allow_factory_bootstrap:
-        print("Warning: the factory certificate does not authenticate the device. "
-              "Use only an isolated management link.", file=sys.stderr)
+    if settings.ignore_tls_verify:
+        print("Warning: TLS identity verification is disabled. Use only an isolated management link.", file=sys.stderr)
+    if (verified or settings.ignore_tls_verify) and current == expected:
+        return "The peer is already serving the desired certificate; no write needed."
     token = session(settings, trust)
     try:
         result, _ = request(settings, trust, "/api/system/ssl_cert", body, "application/json", token)
@@ -281,18 +285,18 @@ def run(settings):
         try:
             peer, _ = probe(settings, trust, timeout=3)
             if peer == expected:
+                if settings.ignore_tls_verify:
+                    return "The peer is serving the exact replacement certificate (TLS trust verification disabled)."
                 return "Verified: the Comet is serving the replacement certificate over trusted HTTPS."
         except (Failure, OSError):
             pass
-    raise Failure("Upload outcome unverified: the replacement was not observed on trusted HTTPS. No upload was repeated.")
+    raise Failure("Upload outcome unverified: the replacement certificate was not observed. No upload was repeated.")
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cert", metavar="PATH", help="PEM leaf followed by intermediates (or COMET_CERT_PATH)")
     parser.add_argument("--key", metavar="PATH", help="unencrypted PEM private key (or COMET_KEY_PATH)")
-    parser.add_argument("--allow-factory-bootstrap", action="store_true",
-                        help="Allow the known shared factory certificate once, on an isolated direct IP link")
     args = parser.parse_args(argv)
     try:
         print(run(Settings.from_env(args)))

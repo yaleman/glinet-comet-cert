@@ -28,30 +28,26 @@ unset COMET_PASSWORD
 | `COMET_USERNAME`, `COMET_PASSWORD` | Required device credentials. |
 | `COMET_CERT_PATH`, `COMET_KEY_PATH` | Instead of flags. Provide PEM leaf plus intermediate chain and its unencrypted PEM private key. |
 | `COMET_CA_PATH` | Optional CA bundle for a private issuer, in addition to the system roots. |
+| `COMET_IGNORE_TLS_VERIFY` | Default false. Set to `true` or `1` to disable CA and hostname verification, including for factory, self-signed, or private-CA certificates. Cannot be combined with a bootstrap pin. |
 | `COMET_TLS_PIN_SHA256` | Optional fallback for a device-unique bootstrap certificate with a fingerprint verified independently. Normal CA and DNS validation still takes precedence; after upload, normal validation is mandatory. Never pin a shared/default certificate. |
 | `COMET_LOGIN_FIELDS` | Default `user-passwd` follows [GL.iNet upstream](https://github.com/gl-inet/glkvm/blob/main/kvmd/apps/kvmd/api/auth.py). Set `username-password` only if that firmware sends those names. There is no automatic retry with different fields. |
 
-### First install with the known factory certificate
+### Untrusted certificates
 
-On a physically isolated management link to the Comet, add
-`--allow-factory-bootstrap` to the local command above. It requires an explicit
-`COMET_CONNECT_IP` and accepts only the known shared factory leaf when normal
-TLS validation fails. It does not accept arbitrary untrusted certificates and
-cannot be combined with the optional device-specific pin.
+Set `COMET_IGNORE_TLS_VERIFY=true` for an isolated management connection when
+you deliberately want to accept the device's untrusted certificate. This still
+uses HTTPS, but an impostor that intercepts the connection could receive the
+password and replacement private key. Prefer `COMET_CA_PATH` for a private CA,
+or leave verification on after installing a certificate from a trusted CA.
 
-The factory key is public. Matching its certificate does **not** authenticate
-the device. Anyone in a position to intercept that traffic can impersonate
-the Comet and receive the password and replacement private key. Do not use
-this on a shared network, expose it to the internet, or add the flag to a
-CronJob. Once the replacement is installed, omit the flag: the verification
-after the upload already requires normal CA and hostname trust.
-
-The uploader validates the full replacement chain, target DNS name and key
-pair locally. If the desired leaf is already served over trusted TLS, it
-does nothing. Otherwise it logs in once, uses only the returned
-`auth_token` cookie, and POSTs the PEM pair as JSON. It checks the new leaf
-over fresh trusted TLS connections while nginx restarts. It does not replay
-the upload or request the private key back. Firmware requiring interactive
+Before sending anything the uploader validates the replacement key pair, and
+with verification enabled it also checks the full replacement chain and DNS
+name locally. If the desired leaf is already served, there is no write.
+Otherwise it logs in once, uses only the returned `auth_token` cookie, and
+POSTs the PEM pair as JSON. It checks the exact new leaf on a fresh connection
+while nginx restarts, without replaying the upload. With verification disabled,
+a matching leaf is not independent authentication of the device. The uploader
+never asks the device to return the private key. Firmware requiring interactive
 two-step authentication is not supported.
 
 ## Kubernetes
