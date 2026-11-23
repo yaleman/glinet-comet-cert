@@ -161,7 +161,7 @@ class TestUploader(unittest.TestCase):
         self.addCleanup(cleanup)
         return server
 
-    def run_cli(self, server, **overrides):
+    def run_cli(self, server, *, cli_args=(), factory_pin=None, **overrides):
         env = {key: value for key, value in os.environ.items()
                if not key.startswith("COMET_")}
         env.update(
@@ -178,8 +178,14 @@ class TestUploader(unittest.TestCase):
                 env.pop(key, None)
             else:
                 env[key] = value
+        if factory_pin is None:
+            command = [sys.executable, str(UPLOADER), *cli_args]
+        else:
+            command = [sys.executable, "-c",
+                       "import uploader,sys; uploader.FACTORY_PIN=sys.argv.pop(1); "
+                       "raise SystemExit(uploader.main())", factory_pin, *cli_args]
         run = subprocess.run(
-            [sys.executable, str(UPLOADER)],
+            command, cwd=UPLOADER.parent,
             env=env, capture_output=True, text=True, timeout=25,
         )
         output = run.stdout + run.stderr
@@ -240,8 +246,64 @@ class TestUploader(unittest.TestCase):
         server = self.start_server(untrusted_old=True)
         run = self.run_cli(server, COMET_TLS_PIN_SHA256=FACTORY_PIN)
         self.assertNotEqual(run.returncode, 0)
-        self.assertIn("shared Comet factory certificate", run.stderr)
+        self.assertIn("shared factory certificate", run.stderr)
         self.assertEqual(server.requests, [])
+
+    def synthetic_factory_pin(self):
+        return hashlib.sha256(ssl.PEM_cert_to_DER_cert(
+            self.paths["old_untrusted_crt"].read_text()
+        )).hexdigest()
+
+    def test_factory_bootstrap_is_opt_in(self):
+        server = self.start_server(untrusted_old=True)
+        run = self.run_cli(server, factory_pin=self.synthetic_factory_pin())
+        self.assertNotEqual(run.returncode, 0)
+        self.assertEqual(server.requests, [])
+
+    def test_factory_bootstrap_requires_explicit_connect_ip(self):
+        server = self.start_server(untrusted_old=True)
+        run = self.run_cli(
+            server, cli_args=("--allow-factory-bootstrap",),
+            factory_pin=self.synthetic_factory_pin(), COMET_CONNECT_IP=None,
+        )
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn("COMET_CONNECT_IP", run.stderr)
+        self.assertEqual(server.requests, [])
+
+    def test_factory_bootstrap_cannot_be_combined_with_custom_pin(self):
+        server = self.start_server(untrusted_old=True)
+        run = self.run_cli(
+            server, cli_args=("--allow-factory-bootstrap",),
+            factory_pin=self.synthetic_factory_pin(), COMET_TLS_PIN_SHA256="a" * 64,
+        )
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn("COMET_TLS_PIN_SHA256", run.stderr)
+        self.assertEqual(server.requests, [])
+
+    def test_factory_bootstrap_rejects_untrusted_nonfactory_leaf(self):
+        server = self.start_server(untrusted_old=True)
+        run = self.run_cli(
+            server, cli_args=("--allow-factory-bootstrap",),
+            factory_pin="a" * 64,
+        )
+        self.assertNotEqual(run.returncode, 0)
+        self.assertEqual(server.requests, [])
+
+    def test_factory_bootstrap_rotates_matching_synthetic_factory_leaf(self):
+        server = self.start_server(untrusted_old=True)
+        pin = self.synthetic_factory_pin()
+        first = self.run_cli(
+            server, cli_args=("--allow-factory-bootstrap",), factory_pin=pin,
+        )
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(server.active, "new")
+        self.assert_upload_forms(server, ("user", "passwd"))
+
+        second = self.run_cli(
+            server, cli_args=("--allow-factory-bootstrap",), factory_pin=pin,
+        )
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(len(server.requests), 2)
 
     def test_matching_old_pin_allows_rotation_to_known_new_leaf(self):
         server = self.start_server(untrusted_old=True)

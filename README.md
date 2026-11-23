@@ -7,7 +7,7 @@ copy of the certificate and private key before sending anything.
 
 ## Local use
 
-The device must already serve an independently trusted HTTPS certificate
+Normally the device must serve an independently trusted HTTPS certificate
 for its name. Set the password in your environment via a private prompt or
 your normal secret manager, not as a command argument. For zsh:
 
@@ -31,11 +31,20 @@ unset COMET_PASSWORD
 | `COMET_TLS_PIN_SHA256` | Optional fallback for a device-unique bootstrap certificate with a fingerprint verified independently. Normal CA and DNS validation still takes precedence; after upload, normal validation is mandatory. Never pin a shared/default certificate. |
 | `COMET_LOGIN_FIELDS` | Default `user-passwd` follows [GL.iNet upstream](https://github.com/gl-inet/glkvm/blob/main/kvmd/apps/kvmd/api/auth.py). Set `username-password` only if that firmware sends those names. There is no automatic retry with different fields. |
 
-The factory certificate observed on this unit is expired and its private
-key is shared. It cannot establish the device's identity and is explicitly
-rejected as a bootstrap pin. Use the vendor's certificate upload UI for the
-first installation over a known physically isolated or otherwise trusted
-management path. Do not use the factory key or submit credentials in chat.
+### First install with the known factory certificate
+
+On a physically isolated management link to the Comet, add
+`--allow-factory-bootstrap` to the local command above. It requires an explicit
+`COMET_CONNECT_IP` and accepts only the known shared factory leaf when normal
+TLS validation fails. It does not accept arbitrary untrusted certificates and
+cannot be combined with the optional device-specific pin.
+
+The factory key is public. Matching its certificate does **not** authenticate
+the device. Anyone in a position to intercept that traffic can impersonate
+the Comet and receive the password and replacement private key. Do not use
+this on a shared network, expose it to the internet, or add the flag to a
+CronJob. Once the replacement is installed, omit the flag: the verification
+after the upload already requires normal CA and hostname trust.
 
 The uploader validates the full replacement chain, target DNS name and key
 pair locally. If the desired leaf is already served over trusted TLS, it
