@@ -4,7 +4,6 @@ import hashlib
 import http.server
 import json
 import os
-from pathlib import Path
 import socket
 import ssl
 import subprocess
@@ -13,6 +12,8 @@ import tempfile
 import threading
 import unittest
 import urllib.parse
+from pathlib import Path
+from typing import Any
 
 UPLOADER = Path(__file__).with_name("uploader.py")
 USERNAME = "mock fixture user+%"
@@ -25,8 +26,13 @@ class HTTPSFixture(http.server.ThreadingHTTPServer):
     daemon_threads = True
 
     def __init__(
-        self, paths, reject_upload=False, untrusted_old=False,
-        require_mfa=False, disconnect_on_upload=False, acknowledge_without_swap=False,
+        self,
+        paths,
+        reject_upload=False,
+        untrusted_old=False,
+        require_mfa=False,
+        disconnect_on_upload=False,
+        acknowledge_without_swap=False,
     ):
         self.paths = paths
         self.reject_upload = reject_upload
@@ -37,7 +43,11 @@ class HTTPSFixture(http.server.ThreadingHTTPServer):
         self.contexts = {}
         for kind in ("old", "new"):
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-            cert = paths["old_untrusted_crt"] if kind == "old" and untrusted_old else paths[kind + "_crt"]
+            cert = (
+                paths["old_untrusted_crt"]
+                if kind == "old" and untrusted_old
+                else paths[kind + "_crt"]
+            )
             context.load_cert_chain(cert, paths[kind + "_key"])
             self.contexts[kind] = context
         self.active = "old"
@@ -54,28 +64,42 @@ class HTTPSFixture(http.server.ThreadingHTTPServer):
 
 
 class FixtureHandler(http.server.BaseHTTPRequestHandler):
-    def log_message(self, _format, *_args):
+    requests: list[Any]
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.requests = []
+
+    def log_message(self, format, *_args):
         return
 
     def do_POST(self):
         count = int(self.headers.get("Content-Length", "0"))
         data = self.rfile.read(count).decode("utf-8")
         content_type = self.headers.get_content_type()
-        body_fields = json.loads(data) if content_type == "application/json" else urllib.parse.parse_qs(data)
+        body_fields = (
+            json.loads(data)
+            if content_type == "application/json"
+            else urllib.parse.parse_qs(data)
+        )
         cookie = self.headers.get("Cookie", "")
-        self.server.requests.append((self.path, body_fields, cookie, content_type))
+        self.requests.append((self.path, body_fields, cookie, content_type))
         status = 200
         new_cookie = None
-        if len(self.server.requests) == 1:
-            reply = {"ok": True, "result": {"two_step_required": True}
-                     if self.server.require_mfa else {}}
+        if len(self.requests) == 1:
+            reply = {
+                "ok": True,
+                "result": {"two_step_required": True}
+                if self.server.require_mfa  # ty: ignore[missing-attribute]
+                else {},
+            }
             new_cookie = f"auth_token={COOKIE_VALUE}; Path=/; Secure; HttpOnly"
-        elif self.server.reject_upload:
+        elif self.server.reject_upload:  # ty: ignore[missing-attribute]
             reply = {"ok": True, "result": {"success": False}}
         else:
-            if not self.server.acknowledge_without_swap:
-                self.server.active = "new"
-            if self.server.disconnect_on_upload:
+            if not self.server.acknowledge_without_swap:  # ty: ignore[missing-attribute]
+                self.server.active = "new"  # ty: ignore[missing-attribute]
+            if self.server.disconnect_on_upload:  # ty: ignore[missing-attribute]
                 self.close_connection = True
                 self.connection.shutdown(socket.SHUT_RDWR)
                 return
@@ -98,8 +122,17 @@ class TestUploader(unittest.TestCase):
         root = Path(cls.temp_dir.name)
         cls.paths = {
             name: root / (name.replace("_", "."))
-            for name in ("ca_crt", "ca_key", "old_crt", "old_key", "new_crt", "new_key",
-                         "old_ca_crt", "old_ca_key", "old_untrusted_crt")
+            for name in (
+                "ca_crt",
+                "ca_key",
+                "old_crt",
+                "old_key",
+                "new_crt",
+                "new_key",
+                "old_ca_crt",
+                "old_ca_key",
+                "old_untrusted_crt",
+            )
         }
         config = root / "extensions.cnf"
         config.write_text(
@@ -114,40 +147,105 @@ class TestUploader(unittest.TestCase):
         def openssl(*args):
             subprocess.run(
                 ["openssl", *map(str, args)],
-                capture_output=True, check=True, timeout=20,
+                capture_output=True,
+                check=True,
+                timeout=20,
             )
 
         openssl(
-            "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "3",
-            "-subj", "/CN=Disposable Comet Fixture CA",
-            "-keyout", cls.paths["ca_key"], "-out", cls.paths["ca_crt"],
-            "-config", config, "-extensions", "ca",
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-days",
+            "3",
+            "-subj",
+            "/CN=Disposable Comet Fixture CA",
+            "-keyout",
+            cls.paths["ca_key"],
+            "-out",
+            cls.paths["ca_crt"],
+            "-config",
+            config,
+            "-extensions",
+            "ca",
         )
         openssl(
-            "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "3",
-            "-subj", "/CN=Independent Comet Fixture CA",
-            "-keyout", cls.paths["old_ca_key"], "-out", cls.paths["old_ca_crt"],
-            "-config", config, "-extensions", "ca",
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-days",
+            "3",
+            "-subj",
+            "/CN=Independent Comet Fixture CA",
+            "-keyout",
+            cls.paths["old_ca_key"],
+            "-out",
+            cls.paths["old_ca_crt"],
+            "-config",
+            config,
+            "-extensions",
+            "ca",
         )
         for serial, kind in enumerate(("old", "new"), start=1):
             csr = root / (kind + ".csr")
             openssl(
-                "req", "-newkey", "rsa:2048", "-nodes",
-                "-subj", f"/CN={HOSTNAME}", "-keyout", cls.paths[kind + "_key"],
-                "-out", csr, "-config", config,
+                "req",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-subj",
+                f"/CN={HOSTNAME}",
+                "-keyout",
+                cls.paths[kind + "_key"],
+                "-out",
+                csr,
+                "-config",
+                config,
             )
             openssl(
-                "x509", "-req", "-days", "2", "-in", csr, "-set_serial", serial,
-                "-CA", cls.paths["ca_crt"], "-CAkey", cls.paths["ca_key"],
-                "-out", cls.paths[kind + "_crt"], "-extfile", config,
-                "-extensions", "leaf",
+                "x509",
+                "-req",
+                "-days",
+                "2",
+                "-in",
+                csr,
+                "-set_serial",
+                serial,
+                "-CA",
+                cls.paths["ca_crt"],
+                "-CAkey",
+                cls.paths["ca_key"],
+                "-out",
+                cls.paths[kind + "_crt"],
+                "-extfile",
+                config,
+                "-extensions",
+                "leaf",
             )
 
         openssl(
-            "x509", "-req", "-days", "2", "-in", root / "old.csr", "-set_serial", "1",
-            "-CA", cls.paths["old_ca_crt"], "-CAkey", cls.paths["old_ca_key"],
-            "-out", cls.paths["old_untrusted_crt"], "-extfile", config,
-            "-extensions", "leaf",
+            "x509",
+            "-req",
+            "-days",
+            "2",
+            "-in",
+            root / "old.csr",
+            "-set_serial",
+            "1",
+            "-CA",
+            cls.paths["old_ca_crt"],
+            "-CAkey",
+            cls.paths["old_ca_key"],
+            "-out",
+            cls.paths["old_untrusted_crt"],
+            "-extfile",
+            config,
+            "-extensions",
+            "leaf",
         )
 
     def start_server(self, **kwargs):
@@ -164,8 +262,11 @@ class TestUploader(unittest.TestCase):
         return server
 
     def run_cli(self, server, *, skip_retry_delays=False, **overrides):
-        env = {key: value for key, value in os.environ.items()
-               if not key.startswith("COMET_")}
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith("COMET_")
+        }
         env.update(
             COMET_URL=f"https://{HOSTNAME}:{server.server_port}",
             COMET_CONNECT_IP="127.0.0.1",
@@ -182,16 +283,30 @@ class TestUploader(unittest.TestCase):
                 env[key] = value
         command = [sys.executable, str(UPLOADER)]
         if skip_retry_delays:
-            command = [sys.executable, "-c",
-                       "import uploader; uploader.time.sleep=lambda _:None; "
-                       "raise SystemExit(uploader.main())"]
+            command = [
+                sys.executable,
+                "-c",
+                "import uploader; uploader.time.sleep=lambda _:None; ",
+                "raise SystemExit(uploader.main())",
+            ]
         run = subprocess.run(
-            command, cwd=UPLOADER.parent,
-            env=env, capture_output=True, text=True, timeout=25,
+            command,
+            cwd=UPLOADER.parent,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=25,
+            check=False,
         )
         output = run.stdout + run.stderr
-        for secret in ["PRIVATE KEY", "BEGIN CERTIFICATE", USERNAME, PASSWORD,
-                       COOKIE_VALUE, *self.paths["new_key"].read_text().splitlines()[1:3]]:
+        for secret in [
+            "PRIVATE KEY",
+            "BEGIN CERTIFICATE",
+            USERNAME,
+            PASSWORD,
+            COOKIE_VALUE,
+            *self.paths["new_key"].read_text().splitlines()[1:3],
+        ]:
             self.assertNotIn(secret, output, "CLI printed confidential input")
         return run
 
@@ -209,8 +324,10 @@ class TestUploader(unittest.TestCase):
         self.assertEqual(upload_content_type, "application/json")
         self.assertEqual(set(upload), {"ssl_cert", "ssl_key"})
         for upload_key, path_key in (("ssl_cert", "new_crt"), ("ssl_key", "new_key")):
-            self.assertTrue(upload[upload_key].strip() == self.paths[path_key].read_text().strip(),
-                            "Upload did not preserve the PEM field")
+            self.assertTrue(
+                upload[upload_key].strip() == self.paths[path_key].read_text().strip(),
+                "Upload did not preserve the PEM field",
+            )
 
     def test_updates_then_skips_identical_leaf_without_logging_in_again(self):
         server = self.start_server()
@@ -266,7 +383,9 @@ class TestUploader(unittest.TestCase):
     def test_ignore_tls_verify_cannot_be_combined_with_pin(self):
         server = self.start_server(untrusted_old=True)
         run = self.run_cli(
-            server, COMET_IGNORE_TLS_VERIFY="true", COMET_TLS_PIN_SHA256="a" * 64,
+            server,
+            COMET_IGNORE_TLS_VERIFY="true",
+            COMET_TLS_PIN_SHA256="a" * 64,
         )
         self.assertNotEqual(run.returncode, 0)
         self.assertIn("COMET_TLS_PIN_SHA256", run.stderr)
@@ -297,7 +416,10 @@ class TestUploader(unittest.TestCase):
     def test_ignore_tls_verify_still_requires_expected_leaf_after_upload(self):
         server = self.start_server(untrusted_old=True, acknowledge_without_swap=True)
         run = self.run_cli(
-            server, skip_retry_delays=True, COMET_IGNORE_TLS_VERIFY="1", COMET_CA_PATH=None,
+            server,
+            skip_retry_delays=True,
+            COMET_IGNORE_TLS_VERIFY="1",
+            COMET_CA_PATH=None,
         )
         self.assertNotEqual(run.returncode, 0)
         self.assertIn("replacement certificate was not observed", run.stderr)
@@ -306,9 +428,9 @@ class TestUploader(unittest.TestCase):
 
     def test_matching_old_pin_allows_rotation_to_known_new_leaf(self):
         server = self.start_server(untrusted_old=True)
-        pin = hashlib.sha256(ssl.PEM_cert_to_DER_cert(
-            self.paths["old_untrusted_crt"].read_text()
-        )).hexdigest()
+        pin = hashlib.sha256(
+            ssl.PEM_cert_to_DER_cert(self.paths["old_untrusted_crt"].read_text())
+        ).hexdigest()
         run = self.run_cli(server, COMET_TLS_PIN_SHA256=pin)
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertEqual(server.active, "new")
@@ -324,7 +446,8 @@ class TestUploader(unittest.TestCase):
     def test_replacement_wrong_dns_name_is_rejected_before_post(self):
         server = self.start_server()
         run = self.run_cli(
-            server, COMET_URL=f"https://wrong-comet-fixture.test:{server.server_port}",
+            server,
+            COMET_URL=f"https://wrong-comet-fixture.test:{server.server_port}",
         )
         self.assertNotEqual(run.returncode, 0)
         self.assertIn("Replacement PEM check failed", run.stderr)
@@ -335,7 +458,9 @@ class TestUploader(unittest.TestCase):
         run = self.run_cli(server)
         self.assertNotEqual(run.returncode, 0)
         self.assertIn("two-step", run.stderr)
-        self.assertEqual([request[0] for request in server.requests], ["/api/auth/login"])
+        self.assertEqual(
+            [request[0] for request in server.requests], ["/api/auth/login"]
+        )
 
     def test_reload_disconnect_verifies_new_peer_without_reupload(self):
         server = self.start_server(disconnect_on_upload=True)

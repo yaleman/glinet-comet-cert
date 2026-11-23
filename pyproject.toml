@@ -1,0 +1,16 @@
+[project]
+name = "glinet-comet-cert"
+version = "0.1.0"
+description = "gl.inet cert uploader for the Comet"
+readme = "README.md"
+authors = [{ name = "James Hodgkinson", email = "james@terminaloutcomes.com" }]
+requires-python = ">=3.13"
+dependencies = []
+
+
+[build-system]
+requires = ["uv_build>=0.13.5,<0.14.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = ["pytest>=9.2.0", "ruff>=0.17.6", "ty>=0.0.108"]

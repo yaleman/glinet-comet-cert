@@ -7,7 +7,6 @@ import http.client
 import ipaddress
 import json
 import os
-from pathlib import Path
 import re
 import socket
 import ssl
@@ -16,11 +15,11 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from http.cookies import CookieError, SimpleCookie
+from pathlib import Path
 from urllib.parse import urlencode, urlsplit
 
-
 FACTORY_PIN = "29a022dbe5de0f400698105d92af25640fa5f149cb590a02abd3eaa3542cffca"
-PEM_CERT = re.compile(rb"-----BEGIN CERTIFICATE-----\s+.*?-----END CERTIFICATE-----", re.S)
+PEM_CERT = re.compile(rb"-----BEGIN CERTIFICATE-----\s+.*?-----END CERTIFICATE-----", re.DOTALL)
 TOKEN = re.compile(r"[A-Za-z0-9_.~+/=-]{1,2048}", re.ASCII)
 LIMIT = 128 * 1024
 
