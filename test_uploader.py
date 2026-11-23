@@ -13,7 +13,7 @@ import threading
 import unittest
 import urllib.parse
 from pathlib import Path
-from typing import Any
+from typing import cast
 
 UPLOADER = Path(__file__).with_name("uploader.py")
 USERNAME = "mock fixture user+%"
@@ -64,16 +64,11 @@ class HTTPSFixture(http.server.ThreadingHTTPServer):
 
 
 class FixtureHandler(http.server.BaseHTTPRequestHandler):
-    requests: list[Any]
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.requests = []
-
     def log_message(self, format, *_args):
         return
 
     def do_POST(self):
+        server = cast(HTTPSFixture, self.server)
         count = int(self.headers.get("Content-Length", "0"))
         data = self.rfile.read(count).decode("utf-8")
         content_type = self.headers.get_content_type()
@@ -83,23 +78,21 @@ class FixtureHandler(http.server.BaseHTTPRequestHandler):
             else urllib.parse.parse_qs(data)
         )
         cookie = self.headers.get("Cookie", "")
-        self.requests.append((self.path, body_fields, cookie, content_type))
+        server.requests.append((self.path, body_fields, cookie, content_type))
         status = 200
         new_cookie = None
-        if len(self.requests) == 1:
+        if len(server.requests) == 1:
             reply = {
                 "ok": True,
-                "result": {"two_step_required": True}
-                if self.server.require_mfa  # ty: ignore[missing-attribute]
-                else {},
+                "result": {"two_step_required": True} if server.require_mfa else {},
             }
             new_cookie = f"auth_token={COOKIE_VALUE}; Path=/; Secure; HttpOnly"
-        elif self.server.reject_upload:  # ty: ignore[missing-attribute]
+        elif server.reject_upload:
             reply = {"ok": True, "result": {"success": False}}
         else:
-            if not self.server.acknowledge_without_swap:  # ty: ignore[missing-attribute]
-                self.server.active = "new"  # ty: ignore[missing-attribute]
-            if self.server.disconnect_on_upload:  # ty: ignore[missing-attribute]
+            if not server.acknowledge_without_swap:
+                server.active = "new"
+            if server.disconnect_on_upload:
                 self.close_connection = True
                 self.connection.shutdown(socket.SHUT_RDWR)
                 return
@@ -138,8 +131,10 @@ class TestUploader(unittest.TestCase):
         config.write_text(
             "[req]\ndistinguished_name=dn\n[dn]\n[leaf]\n"
             "basicConstraints=critical,CA:FALSE\nextendedKeyUsage=serverAuth\n"
+            "authorityKeyIdentifier=keyid:always\n"
             f"subjectAltName=DNS:{HOSTNAME},IP:127.0.0.1\n"
             "[ca]\nbasicConstraints=critical,CA:TRUE\n"
+            "subjectKeyIdentifier=hash\n"
             "keyUsage=critical,keyCertSign,cRLSign\n",
             encoding="ascii",
         )
@@ -283,12 +278,11 @@ class TestUploader(unittest.TestCase):
                 env[key] = value
         command = [sys.executable, str(UPLOADER)]
         if skip_retry_delays:
-            command = [
-                sys.executable,
-                "-c",
-                "import uploader; uploader.time.sleep=lambda _:None; ",
-                "raise SystemExit(uploader.main())",
-            ]
+            script = (
+                "import uploader; uploader.time.sleep=lambda _:None; "
+                "raise SystemExit(uploader.main())"
+            )
+            command = [sys.executable, "-c", script]
         run = subprocess.run(
             command,
             cwd=UPLOADER.parent,
